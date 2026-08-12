@@ -34,7 +34,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { cp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -78,6 +78,31 @@ async function readJson(path: string): Promise<Record<string, unknown>> {
 
 async function writeJson(path: string, data: unknown): Promise<void> {
   await writeFile(path, JSON.stringify(data, null, 2) + '\n');
+}
+
+/**
+ * A release build must be portable across every hostname it is deployed on.
+ * Vite/Wrangler can silently inline their local development defaults, so fail
+ * the build if the webmail origin ever leaks back into an executable bundle.
+ */
+async function assertPortableClientBundle(directory: string): Promise<void> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  for (const entry of entries) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await assertPortableClientBundle(path);
+      continue;
+    }
+    if (!entry.isFile() || !entry.name.endsWith('.js')) continue;
+
+    const source = await readFile(path, 'utf-8');
+    if (source.includes('http://localhost:3000')) {
+      throw new Error(
+        `Client bundle ${path} contains the development webmail origin. ` +
+          'Use a same-origin path for browser navigation instead.',
+      );
+    }
+  }
 }
 
 /**
@@ -229,6 +254,10 @@ async function main() {
       `Client build missing - expected ${CLIENT_BUILD}. Check client/react-router.config.ts.`,
     );
   }
+
+  await step('checking client bundle portability', async () => {
+    await assertPortableClientBundle(CLIENT_BUILD);
+  });
 
   // 3. Copy the built client into dist/client/. fs.cp recursive is
   //    portable; no shell-out cross-platform concerns.
