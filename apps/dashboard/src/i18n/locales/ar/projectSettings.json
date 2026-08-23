@@ -217,11 +217,13 @@
       "protected": "محمي",
       "restoreTitle": "الاستعادة من هذه النسخة الاحتياطية",
       "allowPrune": "السماح للاحتفاظ بالتقليم",
-      "protectFrom": "الحماية من الاحتفاظ"
+      "protectFrom": "الحماية من الاحتفاظ",
+      "cancelTitle": "إلغاء هذه النسخة الاحتياطية"
     },
     "toast": {
       "runFailed": "فشلت عملية النسخ الاحتياطي",
-      "toggleProtectionFailed": "تعذّر تبديل الحماية"
+      "toggleProtectionFailed": "تعذّر تبديل الحماية",
+      "cancelFailed": "فشل إلغاء النسخة الاحتياطية"
     }
   },
   "build": {

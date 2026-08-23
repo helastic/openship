@@ -158,6 +158,19 @@ export interface BackupRun {
   manifestKey: string | null;
   artifacts: unknown[];
   errorMessage: string | null;
+  /** A cancel was taken and the capture has not reached its next checkpoint yet.
+   *  The row is still in-flight, so this is what "cancelling…" is rendered from. */
+  cancelRequested?: boolean;
+}
+
+/** What POST /backup-runs/:id/cancel reports. An in-flight `status` (anything but
+ *  `cancelled`) means the request was taken and the run will honor it at its next
+ *  checkpoint — not that it already happened. */
+export interface CancelRunResult {
+  ok: true;
+  accepted: boolean;
+  status: BackupRun["status"];
+  forced: boolean;
 }
 
 // ─── API ─────────────────────────────────────────────────────────────────────
@@ -252,6 +265,9 @@ export const backupsApi = {
     }),
   getRun: (runId: string) =>
     api.get<{ data: BackupRun }>(endpoints.backups.getRun(runId)),
+
+  cancelRun: (runId: string) =>
+    api.post<{ data: CancelRunResult }>(endpoints.backups.cancelRun(runId)),
 
   protectRun: (
     runId: string,

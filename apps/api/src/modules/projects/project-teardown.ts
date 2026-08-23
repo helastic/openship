@@ -40,6 +40,7 @@ import {
 } from "./project-cleanup.service";
 import { removeProjectFromServerManifests } from "../../lib/openship-manifest-sync";
 import { cancelBuildSession } from "../deployments/build.service";
+import { backupOrchestrator } from "../backups/backup.orchestrator";
 import { restoreOrchestrator } from "../backups/restore.orchestrator";
 import { deleteWebhook as deleteGitHubWebhook } from "../github/github.service";
 import type { RequestContext } from "../../lib/request-context";
@@ -539,16 +540,25 @@ async function stepCancelInFlight(
     }
   }
 
-  // Mark in-flight backup runs cancelled via the FSM. We do not have a
-  // worker-side abort signal yet, so the runner will notice the state
-  // change on its next FSM transition and bail out of writes.
+  // Captures go through the orchestrator, not a bare status flip — same reason as
+  // the restores below. `cancel` fires the in-process AbortController, so `tar -c`
+  // STOPS READING the volume (and a quiesced container is thawed) before the runtime
+  // cleanup starts destroying it underneath; a flip alone left the two racing while
+  // the row already said `cancelled`. It also sets the durable flag, which is what
+  // covers a run executing on another node, and it lets the run reclaim what it had
+  // already uploaded instead of orphaning it at the destination.
+  //
+  // A run that is past `queued` comes back still in-flight on purpose — it gets a
+  // cooperative window. The quiesce poll below IS that window; whatever has not
+  // answered by then gets forced.
+  const unfinishedRuns: string[] = [];
   for (const runId of before.activeBackupRunIds) {
     try {
-      await repos.backupRun.transition(runId, "cancelled", {
-        errorMessage: "Cancelled by project deletion (force=true)",
-      });
+      const outcome = await backupOrchestrator.cancel(ctx, runId);
+      if (outcome.status !== "cancelled") unfinishedRuns.push(runId);
     } catch (err) {
       cancelErrors.push(`backup_run ${runId}: ${safeErrorMessage(err)}`);
+      unfinishedRuns.push(runId);
     }
   }
 
@@ -586,10 +596,19 @@ async function stepCancelInFlight(
   }
 
   if (last.blocking) {
-    // Force any restore that never answered: the teardown barrels on from here and
-    // destroys the target either way, so a row left in `applying` would outlive the
-    // volumes it claims to be writing. The forced path records `partialWrite` /
-    // `serviceLeftStopped`, which is the honest reading after a window that expired.
+    // Force anything that never answered: the teardown barrels on from here and
+    // destroys the volumes either way, so a row left in-flight would outlive the
+    // data it claims to be reading or writing. The forced restore path records
+    // `partialWrite` / `serviceLeftStopped`, which is the honest reading after a
+    // window that expired; the forced capture path says its uploads were left at the
+    // destination, which is the honest reading of a capture nobody could stop.
+    for (const runId of unfinishedRuns) {
+      await backupOrchestrator
+        .cancel(ctx, runId, { force: true })
+        .catch((err) =>
+          cancelErrors.push(`backup_run ${runId} (force): ${safeErrorMessage(err)}`),
+        );
+    }
     for (const restoreId of unfinishedRestores) {
       await restoreOrchestrator
         .cancel(ctx, restoreId, { force: true })
@@ -603,6 +622,9 @@ async function stepCancelInFlight(
       details: last.summary,
       error:
         `Timed out waiting for quiescence after ${QUIESCE_TIMEOUT_MS}ms` +
+        (unfinishedRuns.length > 0
+          ? `; force-cancelled ${unfinishedRuns.length} backup run(s)`
+          : "") +
         (unfinishedRestores.length > 0
           ? `; force-cancelled ${unfinishedRestores.length} restore(s)`
           : "") +

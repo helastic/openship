@@ -40,6 +40,9 @@ r.get("/projects/:projectId/backup-runs", { tag: "project:write", ids: { project
 r.get("/backup-runs/:runId", { tag: "backup_destination:backup_run:read", mcp: { description: "Get one backup run's details/status." } }, ctrl.getOneRun);
 r.get("/backup-runs/:runId/stream", { tag: "backup_destination:backup_run:read" }, ctrl.streamRun);
 
+// Cancel a queued or in-flight capture
+r.post("/backup-runs/:runId/cancel", { tag: "backup_destination:backup_run:write", mcp: { description: "Cancel a queued or in-flight backup run." } }, ctrl.cancelRun);
+
 // Protect-from-retention
 r.post("/backup-runs/:runId/protect", { tag: "backup_destination:backup_run:write" }, ctrl.protectRun);
 

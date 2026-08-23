@@ -217,11 +217,13 @@
       "protected": "Protégée",
       "restoreTitle": "Restaurer à partir de cette sauvegarde",
       "allowPrune": "Autoriser la rétention à purger",
-      "protectFrom": "Protéger de la rétention"
+      "protectFrom": "Protéger de la rétention",
+      "cancelTitle": "Annuler cette sauvegarde"
     },
     "toast": {
       "runFailed": "L'exécution de la sauvegarde a échoué",
-      "toggleProtectionFailed": "Échec du basculement de la protection"
+      "toggleProtectionFailed": "Échec du basculement de la protection",
+      "cancelFailed": "Échec de l'annulation de la sauvegarde"
     }
   },
   "build": {

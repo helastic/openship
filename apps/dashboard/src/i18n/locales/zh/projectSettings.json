@@ -217,11 +217,13 @@
       "protected": "已保护",
       "restoreTitle": "从此备份恢复",
       "allowPrune": "允许保留策略清理",
-      "protectFrom": "免于保留清理"
+      "protectFrom": "免于保留清理",
+      "cancelTitle": "取消此备份"
     },
     "toast": {
       "runFailed": "备份任务失败",
-      "toggleProtectionFailed": "切换保护状态失败"
+      "toggleProtectionFailed": "切换保护状态失败",
+      "cancelFailed": "取消备份失败"
     }
   },
   "build": {

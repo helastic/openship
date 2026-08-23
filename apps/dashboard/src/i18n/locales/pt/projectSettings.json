@@ -217,11 +217,13 @@
       "protected": "Protegido",
       "restoreTitle": "Restaurar a partir desta cópia de segurança",
       "allowPrune": "Permitir limpeza por retenção",
-      "protectFrom": "Proteger da retenção"
+      "protectFrom": "Proteger da retenção",
+      "cancelTitle": "Cancelar este backup"
     },
     "toast": {
       "runFailed": "A execução da cópia de segurança falhou",
-      "toggleProtectionFailed": "Falha ao alternar a proteção"
+      "toggleProtectionFailed": "Falha ao alternar a proteção",
+      "cancelFailed": "Falha ao cancelar o backup"
     }
   },
   "build": {

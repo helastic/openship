@@ -26,6 +26,8 @@ import {
   type BackupDestination,
 } from "@repo/db";
 import { liveContainerForService } from "../services/service-container";
+import { assertResourceInOrg } from "../../lib/controller-helpers";
+import type { RequestContext } from "../../lib/request-context";
 import { backupRunBus } from "./backup.sse";
 import { getJobRunner } from "../../lib/job-runner";
 import { toAdapterRow } from "../backup-destinations/hydrate-server";
@@ -85,6 +87,34 @@ const HOOK_DRAIN_TIMEOUT_MS = 500;
 const TRUNCATE_ERROR_SUMMARY = 500;
 /** A `PutResult.etag` in this shape is a sha256 we can compare ours against. */
 const SHA256_HEX = /^[0-9a-f]{64}$/i;
+/**
+ * How long an unanswered cancel sits before a second press force-terminals the
+ * row. Same value and same reasoning as the restore orchestrator's: the operator
+ * pressed cancel, watched nothing happen, pressed again — and an in-flight run
+ * blocks deleting its project, so there has to be a way out of a wedged row.
+ */
+const FORCE_CANCEL_AFTER_MS = 2 * 60 * 1000;
+
+const TERMINAL_RUN_STATUSES: BackupRunStatus[] = [
+  "succeeded",
+  "failed",
+  "cancelled",
+  "server_error",
+];
+
+/**
+ * Thrown at a checkpoint (or raised by the aborted byte pipeline) to unwind
+ * `execute` into its cancel path instead of its failure path.
+ *
+ * The distinction is the whole point: both paths reclaim every object the run
+ * uploaded, but a cancelled run is not a failure — it must not be recorded as one
+ * and must not page anybody.
+ */
+class BackupCancelled extends Error {
+  constructor() {
+    super("Backup cancelled");
+  }
+}
 
 // ─── Public surface ──────────────────────────────────────────────────────────
 
@@ -117,6 +147,14 @@ interface RunContext {
 }
 
 export class BackupOrchestrator {
+  /**
+   * The LOCAL half of the cancel signal, per run being executed by THIS process.
+   * Handed to the producer so an in-flight `tar -c` stops rather than being waited
+   * out; absent for a run executing on another node, which is why the durable flag
+   * on the row is the half that must always be written.
+   */
+  private readonly inFlight = new Map<string, AbortController>();
+
   /**
    * Create a backup_run row in 'queued' state and kick off the
    * execution in the background. Returns the run id immediately —
@@ -249,6 +287,85 @@ export class BackupOrchestrator {
   }
 
   /**
+   * Cancel a run — queued or mid-flight.
+   *
+   * Three outcomes, and the caller needs to tell them apart:
+   *
+   *   queued     → straight to `cancelled`. Nothing has started, nothing was
+   *                uploaded. `execute()` refuses any row that is not `queued`, so
+   *                a worker that picks the job up afterwards bails on its own.
+   *   in-flight  → the request is RECORDED and the local byte pipeline aborted;
+   *                the run reports `cancelled` from its own catch, after it has
+   *                reclaimed the objects it already put at the destination. The
+   *                answer here is the current status, not `cancelled` — the UI
+   *                says "cancelling…" rather than a status it cannot trust.
+   *   terminal   → idempotent no-op. A double-click on a run that just finished is
+   *                not a problem the operator needs reported.
+   *
+   * `force` (and an unanswered request older than FORCE_CANCEL_AFTER_MS) skips the
+   * cooperative window and terminals the row: an in-flight run blocks deleting its
+   * project, so a wedged one needs a way out. Objects that run had already uploaded
+   * are recorded on the row as usual — retention never prunes a non-succeeded run,
+   * so the forced path says so rather than implying a clean stop.
+   */
+  async cancel(
+    ctx: RequestContext,
+    runId: string,
+    opts: { force?: boolean } = {},
+  ): Promise<{ accepted: boolean; status: BackupRunStatus; forced: boolean }> {
+    const run = await repos.backupRun.findById(runId);
+    try {
+      assertResourceInOrg(run, "Backup run", ctx.organizationId, runId);
+    } catch {
+      throw new Error("Backup run not found");
+    }
+
+    const status = run.status as BackupRunStatus;
+    if (TERMINAL_RUN_STATUSES.includes(status)) {
+      return { accepted: false, status, forced: false };
+    }
+
+    // Durable first, then local. If the process dies between the two, the flag is
+    // what makes the next checkpoint — or another node's — honor the cancel.
+    const flagged = await repos.backupRun.requestCancel(runId);
+    this.inFlight.get(runId)?.abort();
+
+    if (status === "queued") {
+      // The free cancel: no worker has claimed it, so nothing is running and
+      // nothing was uploaded. `execute()` will refuse the row on sight.
+      await this.transition(runId, "cancelled", {
+        errorMessage: "Cancelled before the backup started. Nothing was uploaded.",
+      });
+      return { accepted: true, status: "cancelled", forced: false };
+    }
+
+    const requestedAt = flagged?.cancelRequestedAt ?? run.cancelRequestedAt;
+    const unanswered =
+      requestedAt instanceof Date && Date.now() - requestedAt.getTime() >= FORCE_CANCEL_AFTER_MS;
+    if (opts.force || unanswered) {
+      console.error(
+        `[backup-orchestrator] force-cancelling run ${runId} (` +
+          (opts.force
+            ? "caller forced it"
+            : `no checkpoint answered in ${Math.round(FORCE_CANCEL_AFTER_MS / 1000)}s`) +
+          ")",
+      );
+      // Deliberately NOT clearing `artifacts` the way the failure path does: that
+      // list is what names the objects nobody will collect, and a forced cancel does
+      // not know whether the capture stopped. Retention skips non-succeeded runs, so
+      // the row is the only record they exist.
+      await this.transition(runId, "cancelled", {
+        errorMessage:
+          "Force-cancelled while the backup was still running. Anything it had already " +
+          "uploaded is not a restore point and was left at the destination.",
+      });
+      return { accepted: true, status: "cancelled", forced: true };
+    }
+
+    return { accepted: true, status, forced: false };
+  }
+
+  /**
    * Drive a queued run through its FSM. Updates the row at each
    * transition. Exported so a worker (Chunk 2) can call it directly.
    */
@@ -262,6 +379,22 @@ export class BackupOrchestrator {
       console.warn(`[backup-orchestrator] run ${runId} already in status=${run.status}`);
       return;
     }
+    // A cancel taken while the row was queued terminals it, so the status check above
+    // normally catches it. This covers the race where the flag landed after that write
+    // was read — the runner must not start work the operator has already called off.
+    if (run.cancelRequested) {
+      console.warn(`[backup-orchestrator] run ${runId} was cancelled before it started`);
+      await this.transition(runId, "cancelled", {
+        errorMessage: "Cancelled before the backup started. Nothing was uploaded.",
+      });
+      return;
+    }
+
+    // The local half of the cancel signal, live for exactly this run. Registered
+    // before the first transition so a cancel arriving during `preparing` has
+    // something to abort.
+    const cancelSignal = new AbortController();
+    this.inFlight.set(runId, cancelSignal);
 
     let policy = null as Awaited<ReturnType<typeof repos.backupPolicy.findById>> | null;
     let executor: BackupExecutor | null = null;
@@ -290,6 +423,7 @@ export class BackupOrchestrator {
       await this.transition(runId, "preparing");
 
       // 1. Reload policy + destination + service.
+      await this.throwIfCancelled(runId);
       if (!run.policyId) throw new Error("Run has no policyId");
       policy = (await repos.backupPolicy.findById(run.policyId)) ?? null;
       if (!policy) throw new Error(`Policy ${run.policyId} disappeared`);
@@ -397,6 +531,10 @@ export class BackupOrchestrator {
           : resolveProducer(policy.payloadKind as PayloadKind);
 
       // 4. Snapshot. Pre-hook runs first; failure aborts.
+      //
+      // The last free checkpoint: past here a producer is running and, for the
+      // dump producers, a cancel can only be honored between artifacts.
+      await this.throwIfCancelled(runId);
       const hookLog: string[] = [];
       if (policy.preHook) {
         await this.transition(runId, "snapshotting");
@@ -441,10 +579,30 @@ export class BackupOrchestrator {
       // matched the declared field types and nothing checked it, so a `compression`
       // value outside the codec vocabulary reached the shell layer and produced an
       // artifact whose recorded codec no restore can read. See that function.
-      const producerOpts = sanitizeProducerOpts(policy.payloadConfig);
+      //
+      // `signal` rides ALONGSIDE the sanitized config rather than in it: it is
+      // per-run state, not a policy field, and `sanitizeProducerOpts` only ever sees
+      // jsonb. The volume producer forwards it into `streamPath`, so a cancel stops
+      // the `tar -c` (and thaws a quiesced container) instead of waiting it out.
+      //
+      // ponytail: the dump producers capture through `execStream`, which has no
+      // signal — a cancel there stops the UPLOAD at once and the dump then runs to
+      // its own idle/ceiling watchdog (10 min / 6 h) with nobody reading it. Thread
+      // a signal through `ExecuteCommandOpts` if that wait ever matters; the run
+      // itself is already terminal, so nothing it produces is recorded.
+      const producerOpts = {
+        ...sanitizeProducerOpts(policy.payloadConfig),
+        signal: cancelSignal.signal,
+      };
 
       for await (const artifact of producer.produce(serviceHandle, executor, producerOpts)) {
-        const recorded = await this.uploadArtifact(destination, baseKey, artifact);
+        await this.throwIfCancelled(runId);
+        const recorded = await this.uploadArtifact(
+          destination,
+          baseKey,
+          artifact,
+          cancelSignal.signal,
+        );
         uploadedKeys.push(recorded.key);
         artifactsRecorded.push(recorded);
         totalBytes += recorded.sizeBytes;
@@ -505,6 +663,9 @@ export class BackupOrchestrator {
       //    failure this module is built to prevent. The manifest's job is to catch the
       //    destination disagreeing with the DB, which is a different question.
       await this.transition(runId, "verifying");
+      // Last checkpoint. Past the manifest the run is a restore point, and honoring a
+      // cancel then would throw away a backup that had already been taken in full.
+      await this.throwIfCancelled(runId);
       const manifest = buildManifest({
         runId,
         projectId: ctx.manifest.projectId,
@@ -575,12 +736,24 @@ export class BackupOrchestrator {
         },
       });
     } catch (err) {
+      /**
+       * Was this a cancel rather than a failure?
+       *
+       * `BackupCancelled` covers the checkpoints. The flag re-read covers the other
+       * shape, and is the load-bearing half: aborting the byte pipeline surfaces
+       * HERE as an ordinary stream/upload error, because the executor and the
+       * destination have no way to know a cancel caused it. Left as one, a cancelled
+       * run would be recorded as `failed` — and would page someone for it.
+       */
+      const cancelled = err instanceof BackupCancelled || (await this.cancelRequested(runId));
       // Both forms are scrubbed independently: a second `.slice` over an
       // already-scrubbed string can split a surrogate pair back open.
       const raw = safeErrorMessage(err);
       const message = boundedStorableText(raw, TRUNCATE_ERROR);
       const summary = boundedStorableText(raw, TRUNCATE_ERROR_SUMMARY);
-      console.error(`[backup-orchestrator] run ${runId} failed: ${message}`);
+      console.error(
+        `[backup-orchestrator] run ${runId} ${cancelled ? "cancelled" : "failed"}: ${message}`,
+      );
 
       // Reclaim every object this run put at the destination, whatever went wrong.
       //
@@ -598,7 +771,7 @@ export class BackupOrchestrator {
             if (failed.length === 0) return;
             console.warn(
               `[backup-orchestrator] run ${runId}: ${failed.length}/${uploadedKeys.length} ` +
-                `object(s) could not be reclaimed after the failure and are now orphaned ` +
+                `object(s) could not be reclaimed after the run stopped and are now orphaned ` +
                 `at the destination: ` +
                 failed.map((f) => `${f.key}: ${f.error}`).join("; "),
             );
@@ -606,7 +779,7 @@ export class BackupOrchestrator {
           .catch((cleanupErr) =>
             console.warn(
               `[backup-orchestrator] run ${runId}: ${uploadedKeys.length} object(s) could not ` +
-                `be reclaimed after the failure and are now orphaned at the destination: ` +
+                `be reclaimed after the run stopped and are now orphaned at the destination: ` +
                 `${safeErrorMessage(cleanupErr)}`,
             ),
           );
@@ -623,7 +796,7 @@ export class BackupOrchestrator {
       // other project backs up to as unverified, and the UI would tell the operator
       // their storage is broken when it is fine. The run's own errorMessage carries
       // the real reason either way.
-      if (policy?.destinationId && !destinationProven) {
+      if (policy?.destinationId && !destinationProven && !cancelled) {
         await repos.backupDestination
           .setLastVerified(policy.destinationId, false, summary)
           .catch(() => {});
@@ -648,6 +821,21 @@ export class BackupOrchestrator {
       // Objects the reclaim could NOT delete stay named in the warning it logs — this
       // row is not their record, because retention skips non-succeeded runs and would
       // never act on them anyway.
+      if (cancelled) {
+        // Same empty artifact list and zero byte count as the failure path, for the
+        // same reason: the reclaim above just deleted what those numbers described.
+        // No notification — a cancel is somebody doing this on purpose, and
+        // `backup_run.failed` would page a channel about it.
+        await this.transition(runId, "cancelled", {
+          errorMessage:
+            "Cancelled while the backup was running. Anything already uploaded was " +
+            "removed from the destination, so this run is not a restore point.",
+          artifacts: [],
+          bytesTransferred: 0,
+        });
+        return;
+      }
+
       await this.transition(runId, "failed", {
         errorMessage: message,
         artifacts: [],
@@ -675,8 +863,21 @@ export class BackupOrchestrator {
         }
       }
     } finally {
+      this.inFlight.delete(runId);
       disposeRuntime(sourceRuntime);
     }
+  }
+
+  /** The durable half of the signal, re-read at every checkpoint so a cancel taken
+   *  by another node — or after this process claimed the run — is honored here. */
+  private async cancelRequested(runId: string): Promise<boolean> {
+    const row = await repos.backupRun.findById(runId).catch(() => undefined);
+    return row?.cancelRequested === true;
+  }
+
+  /** Unwind `execute` into its cancel path if a cancel is pending. */
+  private async throwIfCancelled(runId: string): Promise<void> {
+    if (await this.cancelRequested(runId)) throw new BackupCancelled();
   }
 
   // ── Private helpers ──────────────────────────────────────────────────
@@ -701,8 +902,7 @@ export class BackupOrchestrator {
           typeof patch?.bytesTransferred === "number" ? patch.bytesTransferred : undefined,
         artifacts: Array.isArray(patch?.artifacts) ? (patch.artifacts as unknown[]) : undefined,
       });
-      const TERMINAL: BackupRunStatus[] = ["succeeded", "failed", "cancelled", "server_error"];
-      if (TERMINAL.includes(status)) {
+      if (TERMINAL_RUN_STATUSES.includes(status)) {
         backupRunBus.publish(runId, {
           type: "complete",
           status: status as "succeeded" | "failed" | "cancelled" | "server_error",
@@ -718,6 +918,10 @@ export class BackupOrchestrator {
     destination: ReturnType<typeof resolveDestination>,
     baseKey: { projectSlug: string; serviceName: string; runId: string },
     artifact: Artifact,
+    /** The run's cancel signal. Stops THIS upload, whichever producer made the
+     *  artifact — a producer that can't be aborted at the source still stops
+     *  costing bandwidth and storage. */
+    signal?: AbortSignal,
   ): Promise<{
     name: string;
     key: string;
@@ -743,6 +947,35 @@ export class BackupOrchestrator {
     artifact.stream.on("error", (err: Error) => hasher.destroy(err));
     artifact.stream.pipe(hasher);
 
+    // Cancel joins that same error path rather than getting one of its own: destroy
+    // the source and the rejection travels hasher → `put` → the run's catch, which
+    // reclaims what was already uploaded. Removed in the `finally` — one run's signal
+    // outlives many artifacts, and a listener per artifact warns at ten.
+    const onAbort = () => artifact.stream.destroy(new BackupCancelled());
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      return await this.putArtifact(destination, key, artifact, hasher);
+    } finally {
+      signal?.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /** The upload itself. Split out only so `uploadArtifact` above can wrap it in the
+   *  cancel listener's try/finally without re-indenting the whole body. */
+  private async putArtifact(
+    destination: ReturnType<typeof resolveDestination>,
+    key: string,
+    artifact: Artifact,
+    hasher: HashingPassthrough,
+  ): Promise<{
+    name: string;
+    key: string;
+    sizeBytes: number;
+    sha256: string;
+    payloadKind: PayloadKind;
+    metadata: Record<string, unknown>;
+  }> {
     // S3 stores each metadata key as an `x-amz-meta-*` HTTP header, and
     // header values may only contain printable ASCII — no newlines. Some
     // producers (e.g. custom_command) stash multiline shell commands in

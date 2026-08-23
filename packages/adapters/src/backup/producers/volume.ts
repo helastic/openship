@@ -90,6 +90,10 @@ class VolumeCopyProducerImpl implements BackupProducer {
         compression,
         exclude: opts.exclude,
         quiesce: opts.quiesce,
+        // The run's cancel signal. Without it a cancelled run stops READING the
+        // archive while `tar -c` runs to completion — and with `quiesce` that
+        // leaves the service frozen for the rest of it.
+        signal: opts.signal,
       });
 
       // The artifact stream is the executor's stdout. The orchestrator

@@ -88,6 +88,9 @@
       "elapsed": "Geçen Süre",
       "bytes": "Bayt",
       "runId": "Çalıştırma ID",
+      "cancel": "İptal",
+      "cancelling": "İptal ediliyor…",
+      "cancelFailed": "Yedek iptal edilemedi",
       "status": {
         "queued": "Sıraya Alındı",
         "preparing": "Hazırlanıyor",

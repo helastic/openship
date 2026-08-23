@@ -88,6 +88,9 @@
       "elapsed": "Transcurrido",
       "bytes": "Bytes",
       "runId": "ID de ejecución",
+      "cancel": "Cancelar",
+      "cancelling": "Cancelando…",
+      "cancelFailed": "No se pudo cancelar la copia de seguridad",
       "status": {
         "queued": "En cola",
         "preparing": "Preparando",

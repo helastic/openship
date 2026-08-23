@@ -217,11 +217,13 @@
       "protected": "Geschützt",
       "restoreTitle": "Aus diesem Backup wiederherstellen",
       "allowPrune": "Aufräumen durch Aufbewahrung erlauben",
-      "protectFrom": "Vor Aufbewahrung schützen"
+      "protectFrom": "Vor Aufbewahrung schützen",
+      "cancelTitle": "Dieses Backup abbrechen"
     },
     "toast": {
       "runFailed": "Backup-Lauf fehlgeschlagen",
-      "toggleProtectionFailed": "Umschalten des Schutzes fehlgeschlagen"
+      "toggleProtectionFailed": "Umschalten des Schutzes fehlgeschlagen",
+      "cancelFailed": "Backup konnte nicht abgebrochen werden"
     }
   },
   "build": {

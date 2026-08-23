@@ -146,6 +146,16 @@ export interface StreamPathOpts {
    * artifact records which it got.
    */
   quiesce?: boolean;
+  /**
+   * Abort an in-flight capture. The mirror of `ReceiveStreamOpts.signal`, and
+   * load-bearing for the same reason in the other direction: without it a
+   * cancelled run stops READING the archive while `tar -c` runs to completion —
+   * which for a `quiesce` copy leaves the service frozen for the rest of it.
+   *
+   * Aborting a capture is always safe: nothing at the source is written, and the
+   * partial object at the destination is reclaimed by the orchestrator.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ReceiveStreamOpts {
@@ -361,6 +371,17 @@ export interface ProducerOpts {
    * safe for artifacts already captured.
    */
   compression?: PayloadCompression;
+  /**
+   * Forwarded to the executor so a cancelled run stops the capture instead of
+   * only stopping the upload. NOT part of the policy's `payloadConfig` — the
+   * orchestrator attaches it per run, which is why `sanitizeProducerOpts` never
+   * sees it.
+   *
+   * Producers that capture through `execStream` (the dump producers) ignore it
+   * today: `ExecuteCommandOpts` has no signal, so the dump is bounded by its own
+   * idle/ceiling watchdog instead. See the orchestrator's cancel path.
+   */
+  signal?: AbortSignal;
 }
 
 /**

@@ -217,11 +217,13 @@
       "protected": "保護済み",
       "restoreTitle": "このバックアップから復元",
       "allowPrune": "保持期間による削除を許可",
-      "protectFrom": "保持期間から保護"
+      "protectFrom": "保持期間から保護",
+      "cancelTitle": "このバックアップをキャンセル"
     },
     "toast": {
       "runFailed": "バックアップの実行に失敗しました",
-      "toggleProtectionFailed": "保護の切り替えに失敗しました"
+      "toggleProtectionFailed": "保護の切り替えに失敗しました",
+      "cancelFailed": "バックアップをキャンセルできませんでした"
     }
   },
   "build": {

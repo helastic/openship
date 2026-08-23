@@ -1,10 +1,10 @@
 "use client";
 
-import React from "react";
-import { CheckCircle2, XCircle, Loader2, Activity } from "lucide-react";
+import React, { useState } from "react";
+import { CheckCircle2, XCircle, Loader2, Activity, Ban } from "lucide-react";
 import { useBackupRunStream } from "@/hooks/useBackupRunStream";
 import { useI18n, interpolate } from "@/components/i18n-provider";
-import type { BackupRun } from "@/lib/api";
+import { backupsApi, getApiErrorMessage, type BackupRun } from "@/lib/api";
 
 type RunCardDict = ReturnType<typeof useI18n>["t"]["widgets"]["backup"]["runCard"];
 
@@ -22,6 +22,10 @@ export function BackupRunCard({ runId, initial }: Props): React.JSX.Element {
   const { t } = useI18n();
   const w = t.widgets.backup.runCard;
   const run = streamed ?? initial ?? null;
+  // Local, because the cancel is cooperative: the row stays `uploading` until the
+  // capture reaches its next checkpoint, so no transition event carries the request.
+  // `run.cancelRequested` covers the reload — the snapshot re-reads it from the row.
+  const [cancelling, setCancelling] = useState(false);
 
   if (error && !run) {
     return (
@@ -39,6 +43,7 @@ export function BackupRunCard({ runId, initial }: Props): React.JSX.Element {
   }
 
   const inFlight = !["succeeded", "failed", "cancelled", "server_error"].includes(run.status);
+  const cancelPending = cancelling || run.cancelRequested === true;
   const StatusIcon = run.status === "succeeded"
     ? CheckCircle2
     : ["failed", "server_error", "cancelled"].includes(run.status)
@@ -61,12 +66,32 @@ export function BackupRunCard({ runId, initial }: Props): React.JSX.Element {
             {run.triggeredBy}
           </span>
         </div>
-        {connected && inFlight && (
-          <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
-            <Activity className="size-3 animate-pulse" />
-            {w.live}
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {connected && inFlight && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground">
+              <Activity className="size-3 animate-pulse" />
+              {w.live}
+            </span>
+          )}
+          {inFlight && (
+            <button
+              onClick={async () => {
+                setCancelling(true);
+                try {
+                  await backupsApi.cancelRun(run.id);
+                } catch (err) {
+                  setCancelling(false);
+                  window.alert(getApiErrorMessage(err, w.cancelFailed));
+                }
+              }}
+              disabled={cancelPending}
+              className="inline-flex items-center gap-1 rounded-lg bg-muted/50 px-2.5 py-1.5 text-xs font-medium hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Ban className="size-3" />
+              {cancelPending ? w.cancelling : w.cancel}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
