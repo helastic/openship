@@ -73,6 +73,12 @@ const h = vi.hoisted(() => {
     listThrows: null as string | null,
     /** Set to make `listAllContainers` never settle — a half-open bridge. */
     listHangs: false,
+    /**
+     * The same wedge, releasable: a daemon that accepts `ps` and answers only when the
+     * test says so. A bridge that answers in MINUTES rather than never, which is the
+     * only way to watch a container list that lands after its group was written off.
+     */
+    listGate: null as Promise<void> | null,
     /** Set to drop `stabilityProbe`, leaving the sweep with the container list only. */
     noProbe: false,
     /** Set to make every inspect hang — a daemon that answered `ps` and then wedged. */
@@ -318,6 +324,7 @@ function fakeRuntime(box: string | null = null) {
       // Accepted and never answered. A rejection is the polite failure; this is the
       // one the deadline exists for.
       if (h.listHangs) return new Promise<never>(() => {});
+      if (h.listGate) await h.listGate;
       // One box only: a daemon cannot see another box's containers.
       return [...h.containers.values()].filter(
         (c) => (h.containerBox.get(c.id as string) ?? null) === box,
@@ -576,6 +583,7 @@ beforeEach(() => {
   h.localServer = null;
   h.listThrows = null;
   h.listHangs = false;
+  h.listGate = null;
   h.noProbe = false;
   h.sampleHangs = false;
   h.sampleGate = null;
@@ -1109,6 +1117,12 @@ describe("unreachable server", () => {
     h.emit.mockClear();
 
     h.listThrows = "connect ETIMEDOUT 10.0.0.9:22";
+    // Gate 4 covers the box too: one failed read is not an outage.
+    const held = await tick();
+    expect(held.unreachable).toBe(1);
+    expect(held.opened).toBe(0);
+    expect(emitted("server.unreachable")).toHaveLength(0);
+
     const summary = await tick();
 
     expect(summary.unreachable).toBe(1);
@@ -1150,7 +1164,7 @@ describe("unreachable server", () => {
     seedApp({ serverId: null });
 
     h.listThrows = "connect ENOENT /var/run/docker.sock";
-    const down = await tick();
+    const down = await confirm();
     expect(down.unreachable).toBe(1);
     expect(down.opened).toBe(1);
     expect(down.errors).toBe(0);
@@ -1165,6 +1179,42 @@ describe("unreachable server", () => {
     expect(back.resolved).toBe(1);
     expect(emitted("server.reachable")).toHaveLength(1);
     expect(h.incidents.filter((r) => r.status === "open" && !r.projectId)).toHaveLength(0);
+  });
+
+  it("never opens for a box that fails one sweep and answers the next", async () => {
+    // The shape this gate exists for: one read doesn't come back, the next one does.
+    // Opening on the first meant hundreds a day, each opened and resolved in the
+    // same tick, until they were the only thing on the Health tab.
+    const { projectId } = seedApp({ serverId: "srvFlap" });
+
+    for (let i = 0; i < 5; i++) {
+      h.listThrows = "connect ETIMEDOUT 10.0.0.9:22";
+      await tick();
+      h.listThrows = null;
+      await tick();
+    }
+
+    expect(emitted("server.unreachable")).toHaveLength(0);
+    expect(emitted("server.reachable")).toHaveLength(0);
+    expect(h.incidents.filter((r) => r.serverId === "srvFlap")).toHaveLength(0);
+    // The workloads on it were never in doubt.
+    expect(openFor(projectId)).toHaveLength(0);
+  });
+
+  it("counts two failed sweeps of the same box, not two views of one", async () => {
+    // Accelerated runs arrive in bursts, so "seen twice" has to mean twice in TIME.
+    seedApp({ serverId: "srvBurst" });
+    h.listThrows = "connect ETIMEDOUT 10.0.0.9:22";
+
+    await tick();
+    const burst = await tick({ afterMs: 200 });
+
+    expect(burst.opened).toBe(0);
+    expect(emitted("server.unreachable")).toHaveLength(0);
+
+    // Far enough apart to count, and now it pages.
+    expect((await tick()).opened).toBe(1);
+    expect(emitted("server.unreachable")).toHaveLength(1);
   });
 
   it("never blames the box for a failure that happened after it answered", async () => {
@@ -1354,6 +1404,41 @@ describe("unreachable server", () => {
     expect(emitted("service.unhealthy")).toHaveLength(0);
   });
 
+  it("still pages for a box whose reads only ever answer after the deadline", async () => {
+    // The degraded bridge that answers in minutes rather than never. Each tick's list
+    // lands in the middle of the NEXT one, detached, and an abandoned group may not
+    // write: clearing the agreement counter from there restarts the gate every tick, so
+    // the box that really is wedged becomes the one box that never pages. The stale
+    // all-clear is the same write — "is answering again" for a group this tick just
+    // published as unreachable.
+    seedApp({ serverId: "srvSlow" });
+
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], now: Date.now() });
+    let summary: Awaited<ReturnType<typeof tick>>;
+    try {
+      const { runHealthWatch } = await import("./health-watch");
+      for (let i = 0; i < 2; i++) {
+        let release!: () => void;
+        h.listGate = new Promise<void>((resolve) => (release = resolve));
+        const run = runHealthWatch();
+        await vi.advanceTimersByTimeAsync(120_000);
+        summary = await run;
+        // The daemon finally answers the `ps` it accepted 90s ago.
+        release();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+    } finally {
+      h.listGate = null;
+      vi.useFakeTimers({ toFake: ["Date"], now: START });
+    }
+
+    // Two failed sweeps in a row is two, however late their reads came back.
+    expect(summary!.opened).toBe(1);
+    expect(emitted("server.unreachable")).toHaveLength(1);
+    expect(emitted("server.reachable")).toHaveLength(0);
+  });
+
   it("gives up on a daemon that answers nothing at all", async () => {
     // A half-open SSH bridge accepts the request and never replies. Every entry point
     // serializes on one chain, so without a deadline this wedges the whole feature for
@@ -1367,15 +1452,24 @@ describe("unreachable server", () => {
     // Timers are faked for this test alone: the deadline is a real `setTimeout`, and
     // 90s of wall clock for one assertion is not a trade worth making.
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"], now: Date.now() });
+    let held: Awaited<ReturnType<typeof tick>>;
     let summary: Awaited<ReturnType<typeof tick>>;
     try {
       const { runHealthWatch } = await import("./health-watch");
+      const first = runHealthWatch();
+      await vi.advanceTimersByTimeAsync(120_000);
+      held = await first;
       const run = runHealthWatch();
       await vi.advanceTimersByTimeAsync(120_000);
       summary = await run;
     } finally {
       vi.useFakeTimers({ toFake: ["Date"], now: START });
     }
+
+    // Gate 4 reaches the deadline path too. (Both sweeps have run by here, so the
+    // single alert asserted below is itself the proof this one stayed quiet.)
+    expect(held.unreachable).toBe(1);
+    expect(held.opened).toBe(0);
 
     // A box that cannot answer inside the deadline IS unreachable — the same
     // incident as a refused connection, which is the one an operator needs.
@@ -1386,8 +1480,8 @@ describe("unreachable server", () => {
     expect(payloads("server.unreachable")[0]?.message).toContain("2 projects");
     expect(payloads("server.unreachable")[0]?.errorMessage).toContain("within 90s");
     // And the wedged transport is torn down rather than held for the process's life:
-    // `withTimeout` races the read, it cannot cancel it.
-    expect(h.disposed).toHaveBeenCalledTimes(1);
+    // `withTimeout` races the read, it cannot cancel it. Once per wedged sweep.
+    expect(h.disposed).toHaveBeenCalledTimes(2);
 
     // The chain is free: the next sweep runs normally.
     h.listHangs = false;

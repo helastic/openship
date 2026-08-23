@@ -694,6 +694,40 @@ interface GroupContext {
 }
 
 /**
+ * Boxes that failed a sweep but haven't yet earned an incident.
+ *
+ * Gate 4 applies to workloads but never did to the box, which opened and paged on
+ * one failed read — the loudest alert here, on the thinnest evidence. Over SSH a
+ * single request not coming back is ordinary: a wedged bridge channel, a dropped
+ * connection, a daemon mid-restart.
+ *
+ * An entry dies when the box answers or the incident opens, which is every tick for
+ * a box that is still being swept. It survives a box that stops being swept at all —
+ * its last project deleted, or a runtime with no `hostContainerQuery` — so the map can
+ * hold a stale `agreed: 1` for a box nobody is watching, and the next single transient
+ * failure after it comes back pages on one observation. One entry per server and one
+ * early page in that sequence, which is why there is no reaper; add one here if the
+ * fleet ever churns servers fast enough for either to matter.
+ *
+ * Module state like the restart baselines, so a control-plane restart costs at
+ * most one extra tick of detection.
+ */
+const UNREACHABLE_AGREED = new Map<string, { agreed: number; atMs: number }>();
+
+/**
+ * Count a failed sweep and say whether it may open an incident. `MIN_CONFIRM_GAP_MS`
+ * for the reason the workload path uses it: event-accelerated runs arrive in bursts,
+ * and two views of one wedge must not read as two wedges.
+ */
+function agreeUnreachable(target: string, nowMs: number): boolean {
+  const previous = UNREACHABLE_AGREED.get(target);
+  const held = previous !== undefined && nowMs - previous.atMs < MIN_CONFIRM_GAP_MS;
+  const agreed = previous === undefined ? 1 : held ? previous.agreed : previous.agreed + 1;
+  UNREACHABLE_AGREED.set(target, { agreed, atMs: held ? previous.atMs : nowMs });
+  return agreed >= AGREE_TICKS;
+}
+
+/**
  * The server row an unreachable-box incident hangs on.
  *
  * A local group has no `serverId` — its deployment targets the control plane's own
@@ -772,6 +806,20 @@ async function sweepServerGroup(ctx: GroupContext): Promise<void> {
     }
     try {
       const existing = await repos.serviceIncident.findOpenForServer(target);
+      // Gate 4 for the box. An open incident is past it and still touches every
+      // tick, so the all-clear is unaffected.
+      if (!existing && !agreeUnreachable(target, Date.now())) {
+        // Same signal the workload hold raises, for the same reason: this is what the
+        // event accelerator reads to decide a second observation is worth scheduling.
+        // Without it the box is the one verdict the accelerator cannot confirm, and a
+        // real outage waits for the scheduled poll instead of `FOLLOW_UP_MS`.
+        summary.pending++;
+        console.warn(
+          `[health-watch] ${target}: first failed sweep (${reason}) — holding for a second before opening an incident.`,
+        );
+        return;
+      }
+      UNREACHABLE_AGREED.delete(target);
       const server = existing ? undefined : (await repos.server.getMany([target])).get(target);
       const transition = await recordServerUnreachable({
         organizationId,
@@ -864,8 +912,15 @@ async function readServerGroup(
     // same resolver the open path uses, so a LOCAL group can close the incident it
     // opened: that one hangs on the self-server row, which keying this off `serverId`
     // alone (null, here) could never reach.
-    const incidentTarget = await incidentServerId(serverId, organizationId);
+    // Never from an ABANDONED group. A list that lands after the deadline is a write
+    // from a tick already published as unreachable — see `GroupHandle.abandoned`. It
+    // would clear the counter every tick, so a box whose reads only ever answer LATE
+    // could never reach `AGREE_TICKS` and would never page at all; and the all-clear
+    // it sends contradicts the alert the same tick just sent.
+    const incidentTarget = handle.abandoned ? null : await incidentServerId(serverId, organizationId);
     if (incidentTarget) {
+      // An answer is disagreement — this is what keeps the gate to CONSECUTIVE failures.
+      UNREACHABLE_AGREED.delete(incidentTarget);
       const stale = await repos.serviceIncident.findOpenForServer(incidentTarget);
       if (stale && (await resolveServerIncident(stale))) summary.resolved++;
     }
