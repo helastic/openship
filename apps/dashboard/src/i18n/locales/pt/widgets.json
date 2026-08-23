@@ -88,6 +88,9 @@
       "elapsed": "Decorrido",
       "bytes": "Bytes",
       "runId": "ID da execução",
+      "cancel": "Cancelar",
+      "cancelling": "Cancelando…",
+      "cancelFailed": "Falha ao cancelar o backup",
       "status": {
         "queued": "Na fila",
         "preparing": "Preparando",

@@ -14,6 +14,7 @@ import { streamRunSSE } from "../../lib/run-sse";
 import { triggerManualBackup } from "./triggers/manual";
 import { backupRunBus } from "./backup.sse";
 import { restoreRunBus } from "./restore.sse";
+import { backupOrchestrator } from "./backup.orchestrator";
 import { restoreOrchestrator } from "./restore.orchestrator";
 import { safeErrorMessage } from "@repo/core";
 import {
@@ -229,6 +230,29 @@ export async function streamRun(c: Context) {
       : null,
     isFinalEvent: (ev) => ev.type === "complete",
   });
+}
+
+/**
+ * POST /api/backup-runs/:runId/cancel
+ *
+ * Queued or mid-flight. Relayed rather than flattened to {ok:true}: a cancel
+ * during capture is a REQUEST the run honors at its next checkpoint, and the
+ * caller has to be able to tell that from one that already took effect.
+ */
+export async function cancelRun(c: Context) {
+  const ctx = getRequestContext(c);
+  const runId = param(c, "runId");
+  await permission.assert(getRequestContext(c), {
+    resourceType: "backup_run",
+    resourceId: runId,
+    action: "write",
+  });
+  try {
+    const result = await backupOrchestrator.cancel(ctx, runId);
+    return c.json({ data: { ok: true, ...result } });
+  } catch (err) {
+    return c.json({ error: safeErrorMessage(err) }, 400);
+  }
 }
 
 // ─── Manual trigger ──────────────────────────────────────────────────────────

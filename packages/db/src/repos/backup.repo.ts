@@ -573,6 +573,27 @@ export function createBackupRunRepo(db: Database) {
       return row;
     },
 
+    /**
+     * Record a cancel request without transitioning — the running capture honors
+     * it at its next checkpoint, which is what lets it reclaim the objects it
+     * already uploaded instead of orphaning them. Returns the updated row so the
+     * caller can read back the FIRST press time, which `coalesce` preserves: a
+     * second press is the force-terminal signal and must not reset its own
+     * window. Twin of `backupRestore.requestCancel` below.
+     */
+    async requestCancel(id: string): Promise<BackupRun | undefined> {
+      const [row] = await db
+        .update(backupRun)
+        .set({
+          cancelRequested: true,
+          cancelRequestedAt: sql`coalesce(${backupRun.cancelRequestedAt}, now())`,
+          lastEventAt: new Date(),
+        })
+        .where(eq(backupRun.id, id))
+        .returning();
+      return row;
+    },
+
     /** FSM state transition. Always bumps lastEventAt; sets finishedAt
      *  on terminal states. Status is written separately from the patch — see
      *  persistTransition for why the two must not fail as a unit. */
@@ -588,7 +609,12 @@ export function createBackupRunRepo(db: Database) {
         "backup_run",
         id,
         status,
-        { status, lastEventAt: now, ...(finishing ? { finishedAt: now } : {}) },
+        {
+          status,
+          lastEventAt: now,
+          ...(finishing ? { finishedAt: now } : {}),
+          ...(status === "cancelled" ? { cancelledAt: now } : {}),
+        },
         patch as Record<string, unknown> | undefined,
         (values, guarded) =>
           db

@@ -28,24 +28,25 @@ wiring, and 9 locale strings. The dialog no longer needs touching to OFFER it �
 appears with its catalog label and its own `configKeys` as controls; the locale keys
 are what turn that into translated copy.
 
-### Capture cannot be cancelled
+### A dump producer's cancel does not reach the dump
 
-There is no `POST /backup-runs/:runId/cancel`. `backup.routes.ts:30-51` is the whole
-route table and line 49 is the only cancel, for restores. `createAbortWatch`
-(`executors/docker.ts:124`) has exactly ONE call site — inside `receiveStream`, the
-restore extract.
+Capture cancel exists now — cancel columns on `backup_run`, `POST /backup-runs/:runId/cancel`,
+`BackupOrchestrator.cancel()`, and a `signal` on `StreamPathOpts`/`ProducerOpts` that the
+volume producer threads into `streamPath`, where it joins `createAbortWatch`. Project
+teardown goes through the orchestrator rather than a bare status flip, so the run reclaims
+what it uploaded instead of orphaning it.
 
-Capture has no signal to join: `StreamPathOpts` and `ProducerOpts`
-(`types.ts:337-374`) carry no `signal`; the only `AbortSignal` fields in the module
-are restore-side. `backup_run` has no cancel columns at all (`schema/backup.ts:216-295`;
-the trio is on `backupRestore` at `:358-360`). The only thing that "cancels" a run
-today is a DB-only status flip in `project-teardown.ts:542-552`, whose own comment
-says there is no worker-side abort signal. (The RESTORE half of that loop now goes
-through `restoreOrchestrator.cancel`, which does have one — capture is what is left.)
+What is left is the OTHER capture path. `ExecuteCommandOpts` still carries no `signal`, so
+the producers that capture through `execStream` (`pg_dump`, `mysqldump`, `mongodump`,
+`redis`, `custom_command`, `path`) stop their UPLOAD the moment the cancel lands and then
+leave the dump running against its own idle/ceiling watchdog (10 min / 6 h) with nobody
+reading it. Harmless to the run — the row is terminal and `transition()` guards terminal
+states, so nothing the dump produces is recorded — but it holds a `pg_dump`'s transaction
+snapshot open on the user's database for as long as it lasts.
 
-Needs: cancel columns on `backup_run`, the route + controller + an orchestrator
-`cancel()`, a `signal` on `StreamPathOpts`/`ProducerOpts` threaded into `streamPath`
-so capture joins `createAbortWatch`, and a UI entry point.
+Needs: `signal` on `ExecuteCommandOpts`, joined into `attachDemuxed`'s race exactly as
+`demuxContainerStream` now does it, and forwarded from `ProducerOpts.signal` by each of
+those producers.
 
 ### No upload progress, and `uploading` stays out of the idle sweep
 

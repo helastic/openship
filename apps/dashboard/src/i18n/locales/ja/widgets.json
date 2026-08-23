@@ -88,6 +88,9 @@
       "elapsed": "経過時間",
       "bytes": "バイト数",
       "runId": "実行 ID",
+      "cancel": "キャンセル",
+      "cancelling": "キャンセル中…",
+      "cancelFailed": "バックアップをキャンセルできませんでした",
       "status": {
         "queued": "キュー待ち",
         "preparing": "準備中",

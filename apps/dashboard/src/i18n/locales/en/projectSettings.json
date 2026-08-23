@@ -382,11 +382,13 @@
       "protected": "Protected",
       "restoreTitle": "Restore from this backup",
       "allowPrune": "Allow retention to prune",
-      "protectFrom": "Protect from retention"
+      "protectFrom": "Protect from retention",
+      "cancelTitle": "Cancel this backup"
     },
     "toast": {
       "runFailed": "Backup run failed",
-      "toggleProtectionFailed": "Failed to toggle protection"
+      "toggleProtectionFailed": "Failed to toggle protection",
+      "cancelFailed": "Failed to cancel backup"
     }
   },
   "build": {

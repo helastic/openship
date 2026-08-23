@@ -270,6 +270,23 @@ export const backupRun = pgTable(
     /** User-set "protect this backup" toggle. Skips retention prune. */
     retentionLockedUntil: timestamp("retention_locked_until"),
 
+    /**
+     * Cancel is cooperative, exactly as on `backup_restore` below — same three
+     * columns, same reasons. The node taking the cancel is not guaranteed to be
+     * the node streaming the artifact, so the request has to outlive the request
+     * handler; and a capture in `uploading` must SEE the flag at its next
+     * checkpoint rather than be interrupted, so that the objects it already put
+     * at the destination are reclaimed instead of orphaned.
+     *
+     * `cancelRequestedAt` is the force window: an in-flight row whose request is
+     * older than a couple of minutes (operator pressed cancel, waited, pressed
+     * again) is force-terminaled, which is the only escape from a wedged row —
+     * and an in-flight run blocks deleting its project.
+     */
+    cancelRequested: boolean("cancel_requested").notNull().default(false),
+    cancelRequestedAt: timestamp("cancel_requested_at"),
+    cancelledAt: timestamp("cancelled_at"),
+
     /** Soft delete used when the prune sweep removes destination objects. */
     deletedAt: timestamp("deleted_at"),
   },

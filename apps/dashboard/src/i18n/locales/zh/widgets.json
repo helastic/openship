@@ -88,6 +88,9 @@
       "elapsed": "已用时间",
       "bytes": "字节数",
       "runId": "运行 ID",
+      "cancel": "取消",
+      "cancelling": "正在取消…",
+      "cancelFailed": "取消备份失败",
       "status": {
         "queued": "排队中",
         "preparing": "准备中",

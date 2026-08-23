@@ -595,6 +595,7 @@ export const endpoints = {
     listRuns: (projectId: string | number) =>
       `projects/${projectId}/backup-runs`,
     getRun: (runId: string) => `backup-runs/${runId}`,
+    cancelRun: (runId: string) => `backup-runs/${runId}/cancel`,
     protectRun: (runId: string) => `backup-runs/${runId}/protect`,
     prepareRestore: (runId: string) => `backup-runs/${runId}/restore/prepare`,
     applyRestore: (restoreId: string) =>

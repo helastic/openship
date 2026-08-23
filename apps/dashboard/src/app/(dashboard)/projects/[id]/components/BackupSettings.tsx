@@ -17,6 +17,7 @@ import {
   RotateCcw,
   Lock,
   Unlock,
+  Ban,
 } from "lucide-react";
 import { useProjectSettings } from "@/context/ProjectSettingsContext";
 import { useI18n } from "@/components/i18n-provider";
@@ -471,6 +472,12 @@ export function BackupSettings(): React.JSX.Element {
           <ul className="divide-y divide-border/40">
             {runs.map((run) => {
               const isSucceeded = run.status === "succeeded";
+              // A cron-triggered run is only ever visible HERE, so this list is where
+              // "cancel the queued backup" has to live — the live card above only
+              // exists for a run this tab started.
+              const isInFlight = !["succeeded", "failed", "cancelled", "server_error"].includes(
+                run.status,
+              );
               const isProtected = !!(run as { retentionLockedUntil?: string | null }).retentionLockedUntil;
               return (
                 <li key={run.id} className="flex items-center justify-between gap-3 py-2.5 first:pt-0 last:pb-0">
@@ -502,6 +509,23 @@ export function BackupSettings(): React.JSX.Element {
                     )}
                   </div>
                   <div className="flex items-center gap-1">
+                    {isInFlight && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            await backupsApi.cancelRun(run.id);
+                            await reload();
+                          } catch (err) {
+                            window.alert(getApiErrorMessage(err, t.projectSettings.backup.toast.cancelFailed));
+                          }
+                        }}
+                        disabled={run.cancelRequested === true}
+                        title={t.projectSettings.backup.recent.cancelTitle}
+                        className="rounded-lg p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        <Ban className="size-3.5" />
+                      </button>
+                    )}
                     {isSucceeded && (
                       <button
                         onClick={() => setRestoreFromRun(run)}

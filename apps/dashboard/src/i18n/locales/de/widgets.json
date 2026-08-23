@@ -88,6 +88,9 @@
       "elapsed": "Verstrichen",
       "bytes": "Bytes",
       "runId": "Lauf-ID",
+      "cancel": "Abbrechen",
+      "cancelling": "Wird abgebrochen…",
+      "cancelFailed": "Backup konnte nicht abgebrochen werden",
       "status": {
         "queued": "In Warteschlange",
         "preparing": "Wird vorbereitet",

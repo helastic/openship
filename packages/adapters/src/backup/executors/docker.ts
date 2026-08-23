@@ -487,6 +487,7 @@ export class DockerBackupExecutor implements BackupExecutor {
           idleTimeoutMs: opts?.idleTimeoutMs ?? DEFAULT_HELPER_IDLE_MS,
           timeoutMs: opts?.timeoutMs ?? DEFAULT_HELPER_TIMEOUT_MS,
           label: `Backup of "${sourceId}" on service ${service.name}`,
+          signal: opts?.signal,
         });
       },
     ).catch(async (err) => {
@@ -496,16 +497,22 @@ export class DockerBackupExecutor implements BackupExecutor {
     });
 
     if (!quiesceId) return handed;
+    const thawed = handed.awaitExit.finally(() =>
+      this.thaw(quiesceId, `backup of "${sourceId}"`),
+    );
+    // A DERIVED promise, so it needs its own no-op handler — `handed.awaitExit`
+    // having one does not cover this one, and this is the promise the producer
+    // abandons when a cancel finalizes the generator.
+    void thawed.catch(() => {});
     return {
       stdout: handed.stdout,
-      // Thaw when the copy is DONE, however it ends. `awaitExit` settles once the helper
-      // has exited and its output has drained, which is precisely the window the freeze has
-      // to cover; unfreezing when `streamPath` returned would thaw before a single byte had
-      // been read. The original promise is handed back so a caller still sees its value or
-      // its rejection.
-      awaitExit: handed.awaitExit.finally(() =>
-        this.thaw(quiesceId, `backup of "${sourceId}"`),
-      ),
+      // Thaw when the copy is DONE, however it ends — including a cancel, which
+      // rejects `awaitExit` from the abort watch. `awaitExit` settles once the helper
+      // has exited and its output has drained, which is precisely the window the freeze
+      // has to cover; unfreezing when `streamPath` returned would thaw before a single
+      // byte had been read. The original promise's value or rejection is passed
+      // through, so a caller still sees it.
+      awaitExit: thawed,
     };
   }
 
@@ -1247,7 +1254,15 @@ export class DockerBackupExecutor implements BackupExecutor {
   private demuxContainerStream(
     container: Dockerode.Container,
     stream: NodeJS.ReadWriteStream,
-    opts: { timeoutMs: number; idleTimeoutMs: number; label: string },
+    opts: {
+      timeoutMs: number;
+      idleTimeoutMs: number;
+      label: string;
+      /** Cancel the capture. Joins the same race as the idle watchdog, so the
+       *  existing failure path does the teardown: `stdout` is destroyed (the
+       *  consumer's upload fails) and the helper is force-removed. */
+      signal?: AbortSignal;
+    },
   ): { stdout: Readable; awaitExit: Promise<ExecExitInfo> } {
     const stdout = new PassThrough({ highWaterMark: ARTIFACT_BUFFER_BYTES });
     const stderrChunks: Buffer[] = [];
@@ -1323,6 +1338,14 @@ export class DockerBackupExecutor implements BackupExecutor {
       watchdog.touch();
     });
 
+    const abortWatch = opts.signal
+      ? createAbortWatch(
+          opts.signal,
+          `${opts.label} was cancelled. Nothing at the source was written; the partial ` +
+            `archive was not kept.`,
+        )
+      : null;
+
     const awaitExit = (async (): Promise<ExecExitInfo> => {
       try {
         // Poll for the exit only once the attach stream has ended: before that
@@ -1332,6 +1355,7 @@ export class DockerBackupExecutor implements BackupExecutor {
           timeoutMs: opts.timeoutMs,
           label: opts.label,
           note: "Nothing was written; the archive is incomplete and was not kept.",
+          cancelled: abortWatch?.promise,
         });
         exited = true;
         // Backstop for an attach whose end/close is never delivered (it happens over
@@ -1392,8 +1416,15 @@ export class DockerBackupExecutor implements BackupExecutor {
         throw err;
       } finally {
         watchdog.dispose();
+        abortWatch?.dispose();
       }
     })();
+
+    // Same guard, and the same reason, as `attachDemuxed` above: a consumer stops
+    // awaiting this the moment an upload fails or the run is cancelled, and an
+    // unhandled rejection later is fatal on the Node-hosted desktop API. The
+    // cancel path makes that the ORDINARY case rather than a rare one.
+    void awaitExit.catch(() => {});
 
     return { stdout, awaitExit };
   }

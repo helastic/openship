@@ -262,6 +262,41 @@ runCmd
   );
 
 runCmd
+  .command("cancel")
+  .description("Cancel a queued or in-flight backup run")
+  // POST /api/backup-runs/:runId/cancel
+  .argument("<runId>", "Backup run ID")
+  .action((runId) =>
+    guard(async () => {
+      const { data } = await apiRequest<
+        Envelope<{ ok: boolean; accepted: boolean; status: string; forced: boolean }>
+      >(`/backup-runs/${encodeURIComponent(runId)}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      // Same distinction the restore half makes: a cancel taken while the capture
+      // is running is a REQUEST honored at its next checkpoint, so printing
+      // "cancelled" there would be a lie.
+      if (data.status === "cancelled") {
+        ok(`\n  Backup cancelled: ${runId}${data.forced ? " (forced)" : ""}\n`);
+        if (data.forced) {
+          err(
+            `  It was force-cancelled while still running, so anything it had already\n` +
+              `  uploaded was left at the destination. It is not a restore point.\n`,
+          );
+        }
+      } else if (data.accepted) {
+        info(
+          `\n  Cancellation requested: ${runId} (status=${data.status}).\n` +
+            `  Follow it with: openship backup run get ${runId} --follow\n`,
+        );
+      } else {
+        info(`\n  Run ${runId} already finished (status=${data.status}) — nothing to cancel.\n`);
+      }
+    }),
+  );
+
+runCmd
   .command("protect")
   .description("Protect a run from retention pruning (or release it)")
   // POST /api/backup-runs/:runId/protect  { until?, protected? }

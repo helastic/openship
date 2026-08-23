@@ -88,6 +88,9 @@
       "elapsed": "Écoulé",
       "bytes": "Octets",
       "runId": "ID d'exécution",
+      "cancel": "Annuler",
+      "cancelling": "Annulation…",
+      "cancelFailed": "Échec de l'annulation de la sauvegarde",
       "status": {
         "queued": "En file d'attente",
         "preparing": "Préparation",

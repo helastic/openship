@@ -351,11 +351,13 @@
       "protected": "Korunan",
       "restoreTitle": "Bu yedekten geri yükle",
       "allowPrune": "Saklama süresi dolduğunda silinmesine izin ver",
-      "protectFrom": "Saklama süresi temizliğinden koru"
+      "protectFrom": "Saklama süresi temizliğinden koru",
+      "cancelTitle": "Bu yedeği iptal et"
     },
     "toast": {
       "runFailed": "Yedekleme işlemi başarısız oldu",
-      "toggleProtectionFailed": "Koruma durumu değiştirilemedi"
+      "toggleProtectionFailed": "Koruma durumu değiştirilemedi",
+      "cancelFailed": "Yedek iptal edilemedi"
     }
   },
   "build": {
