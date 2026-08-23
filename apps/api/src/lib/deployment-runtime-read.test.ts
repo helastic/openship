@@ -18,15 +18,16 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 
 const h = vi.hoisted(() => ({
   baseTarget: "selfhosted" as "selfhosted" | "desktop" | "cloud",
-  /** Every DockerRuntime.create — transport plus, for ssh, the host it dialed. */
-  creates: [] as Array<{ transport: string; host?: string }>,
+  /** Every DockerRuntime.create — transport, the host ssh dialed, and the request
+   *  bound it was given (undefined = the transport default). */
+  creates: [] as Array<{ transport: string; host?: string; timeout?: number }>,
   platformCalls: 0,
 }));
 
 vi.mock("@repo/adapters", () => ({
   DockerRuntime: {
-    create: async (opts: { transport: string; host?: string }) => {
-      h.creates.push({ transport: opts?.transport, host: opts?.host });
+    create: async (opts: { transport: string; host?: string; timeout?: number }) => {
+      h.creates.push({ transport: opts?.transport, host: opts?.host, timeout: opts?.timeout });
       return { name: "docker", supports: () => true };
     },
   },
@@ -69,8 +70,8 @@ vi.mock("@repo/db", () => ({
 
 const mod = await import("./deployment-runtime");
 
-const read = (meta: Record<string, unknown>) =>
-  mod.resolveDeploymentRuntimeForRead({ meta, organizationId: "org1" } as never);
+const read = (meta: Record<string, unknown>, budget?: { requestTimeoutMs?: number }) =>
+  mod.resolveDeploymentRuntimeForRead({ meta, organizationId: "org1" } as never, budget);
 
 /** Hosts dialed over the ssh transport, in order. */
 const sshHosts = () => h.creates.filter((c) => c.transport === "ssh").map((c) => c.host);
@@ -133,5 +134,28 @@ describe("resolveDeploymentRuntimeForRead — reaches the deploy's host, without
     await read({ serverId: "srv-remote" });
     expect(sshHosts()).toEqual(["host-of-srv-remote"]);
     expect(h.platformCalls).toBe(0);
+  });
+});
+
+/**
+ * A poller can bound its own requests; everyone else keeps the transport default
+ * (600s over SSH, sized for the pulls that share the connection — and for
+ * `streamRuntimeLogs`, where silence is normal).
+ */
+describe("resolveDeploymentRuntimeForRead — per-request inactivity budget", () => {
+  it("passes the caller's bound to the ssh transport", async () => {
+    await read({ deployTarget: "server", serverId: "srv-9" }, { requestTimeoutMs: 15_000 });
+    expect(h.creates).toEqual([{ transport: "ssh", host: "host-of-srv-9", timeout: 15_000 }]);
+  });
+
+  it("REGRESSION: a caller that asks for nothing keeps the transport default", async () => {
+    // `timeout: undefined` is the point — docker-transport must still pick 600s.
+    await read({ deployTarget: "server", serverId: "srv-9" });
+    expect(h.creates).toEqual([{ transport: "ssh", host: "host-of-srv-9", timeout: undefined }]);
+  });
+
+  it("does not narrow the local socket, which has no bridge to wedge", async () => {
+    await read({ deployTarget: "local" }, { requestTimeoutMs: 15_000 });
+    expect(h.creates).toEqual([{ transport: "socket", host: undefined, timeout: undefined }]);
   });
 });
