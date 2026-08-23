@@ -147,6 +147,25 @@ const GROUP_DEADLINE_MS = 90_000;
 const GROUP_DEADLINE_REASON = `no answer from the docker daemon within ${Math.round(
   GROUP_DEADLINE_MS / 1000,
 )}s`;
+/**
+ * Inactivity bound on ONE request in this sweep (`RuntimeRequestBudget`).
+ *
+ * The deadline above bounds the SWEEP; nothing bounds a request, because the SSH
+ * transport's own default is 600s. So one stalled call spends the whole 90s budget
+ * and the next tick queues behind it on `sweepChain`.
+ *
+ * Sized above the BRIDGE's own worst case, not above an inspect's. The runtime is
+ * built and disposed per tick, so the first request of every sweep — the container
+ * list — waits, with no byte on the wire, through the whole streamlocal-vs-dial-stdio
+ * handshake: an 8s open, an 8s data probe, then a dial-stdio open plus a 3s
+ * first-byte window (docker-ssh-agent). That is ~19s on a HEALTHY box that falls back
+ * to dial-stdio, and the migration scan already budgets 25s for the same handshake.
+ * A bound below it destroys that first request, gate 3 sees `listed === false`, and
+ * `recordServerUnreachable` — which has no agreement gate — pages every tick for a
+ * box that is answering fine. Half the deadline: still 13x tighter than 600s, still
+ * leaves the sweep room to report the failure itself.
+ */
+const READ_REQUEST_TIMEOUT_MS = 45_000;
 /** Inspects issued concurrently against one daemon. */
 const INSPECT_CONCURRENCY = 8;
 /**
@@ -849,10 +868,15 @@ async function readServerGroup(
     // this is belt and braces, and it is the cheap direction: it makes the transport a
     // function of the group KEY instead of of whichever project happened to sort first,
     // which is the invariant every verdict in this group depends on.
-    const resolved = await resolveDeploymentRuntimeForRead({
-      meta: { ...((first.dep.meta ?? {}) as DeploymentMeta), serverId: serverId ?? undefined },
-      organizationId,
-    });
+    const resolved = await resolveDeploymentRuntimeForRead(
+      {
+        meta: { ...((first.dep.meta ?? {}) as DeploymentMeta), serverId: serverId ?? undefined },
+        organizationId,
+      },
+      // Lists and inspects only — no pull, no build, no follow — so it can bound
+      // its own requests instead of inheriting the connection's 600s.
+      { requestTimeoutMs: READ_REQUEST_TIMEOUT_MS },
+    );
     handle.runtime = resolved.runtime;
     const runtime = resolved.runtime;
     if (!runtime.supports("hostContainerQuery") || !runtime.listAllContainers) return;

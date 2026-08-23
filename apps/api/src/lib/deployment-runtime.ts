@@ -502,6 +502,20 @@ export async function resolveTargetPlatform(
 }
 
 /**
+ * A caller's own bound on how long ONE Docker API request may sit silent.
+ *
+ * The SSH transport defaults to 600s, which docker-modem applies as a per-request
+ * INACTIVITY timeout — right for the pulls and builds sharing the connection, far
+ * too long for a poller. Opt-in, because the same runtime serves
+ * `streamRuntimeLogs` (`follow: true`), where silence is normal.
+ */
+export interface RuntimeRequestBudget {
+  /** Inactivity bound for one Docker API request, in ms. Set it below whatever
+   *  deadline the caller already enforces. */
+  requestTimeoutMs?: number;
+}
+
+/**
  * Build a DockerRuntime pointed at an org server's Docker daemon over SSH, for
  * READ-ONLY inspection (migrating an existing Docker deployment into Openship).
  *
@@ -517,6 +531,7 @@ export async function createServerDockerRuntime(
    *  serverId takes. Keeps that rule in ONE place. */
   serverId: string | undefined,
   organizationId: string,
+  opts?: RuntimeRequestBudget,
 ): Promise<DockerRuntime> {
   const { executor, isLocal, ssh } = await resolveServerExecutor(serverId, organizationId);
   // Registry credentials for every pull this runtime makes, bound to THIS org. Injected
@@ -530,7 +545,12 @@ export async function createServerDockerRuntime(
   if (isLocal) {
     return DockerRuntime.create({ transport: "socket", resolveRegistryAuth });
   }
-  return DockerRuntime.create({ ...toDockerSshTransport(ssh!, executor), resolveRegistryAuth });
+  return DockerRuntime.create({
+    ...toDockerSshTransport(ssh!, executor),
+    resolveRegistryAuth,
+    // Undefined keeps the transport default (600s over SSH).
+    timeout: opts?.requestTimeoutMs,
+  });
 }
 
 /**
@@ -1024,6 +1044,8 @@ function asHostUnreachable(err: unknown): unknown {
 
 export async function resolveDeploymentRuntimeForRead(
   dep: Pick<Deployment, "meta" | "organizationId">,
+  /** See `RuntimeRequestBudget`. Omitted → the transport default. SSH only. */
+  budget?: RuntimeRequestBudget,
 ): Promise<{ runtime: RuntimeAdapter; serverId: string | null }> {
   // Services are containers even when the app itself deploys "bare" — pin docker
   // so a bare project's sidecars still resolve a docker runtime (matches
@@ -1033,7 +1055,7 @@ export async function resolveDeploymentRuntimeForRead(
 
   if (effectiveTarget === "server") {
     return {
-      runtime: await createServerDockerRuntime(snapshot.serverId, dep.organizationId),
+      runtime: await createServerDockerRuntime(snapshot.serverId, dep.organizationId, budget),
       // Same value resolveDeploymentPlatform reports: the RECORDED id, which
       // streaming callers use to retain/release the pooled SSH connection.
       serverId: snapshot.serverId ?? null,
