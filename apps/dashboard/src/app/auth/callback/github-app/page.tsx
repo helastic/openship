@@ -17,7 +17,15 @@ export default function GitHubAppSetupCallback() {
       const state = query.get("state");
       const setupAction = query.get("setup_action");
 
-      if (!state || (flow === "manifest" ? !code : !installationId)) {
+      // GitHub owns this URL's query string, and it will not carry a `flow` of
+      // ours: the manifest `redirect_url` must be bare (a query string there is
+      // rejected outright), so state travels on the registration url instead and
+      // comes back with `code`. Tell the two landings apart by what GitHub sent —
+      // `code` is the manifest conversion, `installation_id` is the install. The
+      // explicit `flow` is still honoured for a link issued before this change.
+      const isManifest = flow === "manifest" || (!!code && !installationId);
+
+      if (!state || (isManifest ? !code : !installationId)) {
         setMessage(
           "GitHub did not return the required installation details. Start again from Settings.",
         );
@@ -26,22 +34,21 @@ export default function GitHubAppSetupCallback() {
 
       try {
         const base = getApiOrigin(window.location.origin);
-        const endpoint =
-          flow === "manifest"
-            ? `${base}/api/github/sources/manifest/convert`
-            : `${base}/api/github/installations/claim`;
+        const endpoint = isManifest
+          ? `${base}/api/github/sources/manifest/convert`
+          : `${base}/api/github/installations/claim`;
         const response = await fetch(endpoint, {
           method: "POST",
           credentials: "include",
           headers: { "content-type": "application/json" },
           body: JSON.stringify(
-            flow === "manifest" ? { code, state } : { installationId, state, setupAction },
+            isManifest ? { code, state } : { installationId, state, setupAction },
           ),
         });
         const data = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(data?.message || "Could not verify the installation.");
 
-        if (flow === "manifest") {
+        if (isManifest) {
           if (!data?.installUrl)
             throw new Error("GitHub App was created, but its install URL is missing.");
           setMessage("GitHub App created. Opening repository access…");

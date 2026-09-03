@@ -182,12 +182,10 @@ describe("workspace GitHub source service", () => {
   it("builds a state-bound least-privilege GitHub manifest", async () => {
     const result = await beginGitHubManifestFlow(ctx, { name: "Acme Production" });
 
-    expect(result.url).toBe("https://github.com/settings/apps/new");
+    expect(result.url).toMatch(/^https:\/\/github\.com\/settings\/apps\/new\?state=.+/);
     expect(result.manifest).toMatchObject({
       url: "https://ship.example",
-      redirect_url: expect.stringMatching(
-        /^https:\/\/ship\.example\/auth\/callback\/github-app\?flow=manifest&state=/,
-      ),
+      redirect_url: "https://ship.example/auth/callback/github-app",
       setup_url: "https://ship.example/auth/callback/github-app",
       public: false,
       request_oauth_on_install: false,
@@ -217,6 +215,21 @@ describe("workspace GitHub source service", () => {
       }),
     );
     expect(JSON.stringify(result.manifest)).not.toContain("secret");
+  });
+
+  it("REGRESSION: never puts a query string on the manifest redirect_url", async () => {
+    // GitHub rejects the WHOLE submission when `redirect_url` carries one — the
+    // operator gets "does not appear to be a valid GitHub App manifest /
+    // redirect_url must be a valid URL" and no App is ever created. Verified
+    // against github.com: one parameter is enough to fail it.
+    const result = await beginGitHubManifestFlow(ctx, { name: "Acme Production" });
+    const redirect = new URL((result.manifest as { redirect_url: string }).redirect_url);
+
+    expect(redirect.search).toBe("");
+    // The state still has to reach the callback, on the url GitHub echoes back from.
+    expect(new URL(result.url).searchParams.get("state")).toEqual(
+      h.stateCreate.mock.calls.at(-1)?.[0]?.state,
+    );
   });
 
   it("persists manifest credentials through an atomic one-shot state consume", async () => {
