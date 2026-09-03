@@ -395,13 +395,18 @@ export async function beginGitHubManifestFlow(
     expiresAt: new Date(Date.now() + SETUP_STATE_TTL_MS),
   });
 
-  const callback = `${githubSourceSetupUrl()}?flow=manifest&state=${encodeURIComponent(state)}`;
+  // `state` rides the REGISTRATION url, not `redirect_url`. GitHub rejects a
+  // manifest whose `redirect_url` carries any query string at all — the whole
+  // submission comes back as "does not appear to be a valid GitHub App manifest
+  // / redirect_url must be a valid URL", so the flow could never complete. Its
+  // own state parameter is the supported channel and is echoed back to the
+  // callback next to `code`, which is what the callback matches on.
   return {
-    url: "https://github.com/settings/apps/new",
+    url: `https://github.com/settings/apps/new?state=${encodeURIComponent(state)}`,
     manifest: {
       name: manifestAppName(name),
       url: resolveDashboardPublicUrl(),
-      redirect_url: callback,
+      redirect_url: githubSourceSetupUrl(),
       setup_url: githubSourceSetupUrl(),
       setup_on_update: false,
       public: false,
